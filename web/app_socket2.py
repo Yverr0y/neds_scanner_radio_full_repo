@@ -56,6 +56,7 @@ from scanner_intelligence import (
 from chatbot.app import (
     generate_call_enrichment_batch,
     generate_neds_take_commentary,
+    vllm_in_backoff,
 )
 from user_logger import init_user_activity_table
 
@@ -440,17 +441,21 @@ def calculate_all_stats():
 def refresh_call_enrichments():
     """Prepare per-call AI views and dispatch bounded comparison retries."""
     try:
-        enrichment = process_call_enrichment_batch(
-            generator=generate_call_enrichment_batch,
-            day="today",
-            limit=int(os.environ.get("NEDS_TAKE_CALL_ENRICHMENT_BATCH_SIZE", "6")),
-        )
-        logger.info(
-            "neds_take.call_enrichment selected=%s completed=%s failed=%s",
-            enrichment.get("selected", 0),
-            enrichment.get("completed", 0),
-            enrichment.get("failed", 0),
-        )
+        if vllm_in_backoff():
+            logger.debug("neds_take.call_enrichment deferred=ai-backoff")
+        else:
+            enrichment = process_call_enrichment_batch(
+                generator=generate_call_enrichment_batch,
+                day="today",
+                limit=int(os.environ.get("NEDS_TAKE_CALL_ENRICHMENT_BATCH_SIZE", "6")),
+            )
+            logger.info(
+                "neds_take.call_enrichment selected=%s completed=%s failed=%s deferred=%s",
+                enrichment.get("selected", 0),
+                enrichment.get("completed", 0),
+                enrichment.get("failed", 0),
+                enrichment.get("deferred", 0),
+            )
         if redis_client:
             retries = dispatch_pending_retranscriptions(
                 redis_client,
@@ -478,11 +483,12 @@ def refresh_call_enrichments():
 def refresh_neds_take():
     """Build and publish the LLM edition away from the browser request path."""
     try:
+        ai_available = not vllm_in_backoff()
         result = get_or_generate_daily_take(
             day="today",
             edition_type="rolling",
             force=True,
-            commentary_generator=generate_neds_take_commentary,
+            commentary_generator=(generate_neds_take_commentary if ai_available else None),
         )
         logger.info(
             "neds_take.rolling.generated day=%s transmissions=%s incidents=%s",
@@ -498,11 +504,12 @@ def finalize_previous_neds_take():
     """Freeze yesterday's end-of-day edition after late transmissions settle."""
     previous_day = (datetime.now(LOCAL_TIMEZONE) - timedelta(days=1)).date().isoformat()
     try:
+        ai_available = not vllm_in_backoff()
         result = get_or_generate_daily_take(
             day=previous_day,
             edition_type="final",
             force=True,
-            commentary_generator=generate_neds_take_commentary,
+            commentary_generator=(generate_neds_take_commentary if ai_available else None),
         )
         logger.info(
             "neds_take.final.generated day=%s transmissions=%s incidents=%s",

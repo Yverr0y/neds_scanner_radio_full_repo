@@ -43,16 +43,6 @@
         </div>
         {% endif %}
 
-        <button id="push-btn"
-          style="display:none"
-          class="scanner-icon-button text-base"
-          type="button"
-          aria-label="Enable push notifications for new calls"
-          aria-pressed="false"
-          title="Enable push notifications">
-          🔕
-        </button>
-
         <button id="install-btn"
           class="scanner-icon-button scanner-install-button hidden">
           <span class="hidden sm:inline">Install App</span>
@@ -65,29 +55,14 @@
         <button id="notif-settings-btn"
           class="scanner-icon-button scanner-desktop-notif text-sm"
           type="button"
-          aria-label="Open notification settings"
-          title="Notification settings">
-          🔔
+          data-notification-control
+          aria-label="Open scanner alert settings"
+          title="Scanner alert settings">
+          <span aria-hidden="true">🔔</span>
+          <span>Alerts</span>
+          <span class="notification-control-status" data-notification-status>Off</span>
         </button>
 
-        <div id="menu-dropdown"
-          class="hidden scanner-more-menu absolute right-0 top-full mt-2 w-56 overflow-hidden rounded-2xl border border-slate-700/80 bg-[#0c1628]/96 py-2 shadow-2xl backdrop-blur-xl"
-          role="navigation"
-          aria-label="More scanner navigation">
-          <a href="/scanner/" class="menu-item">Home</a>
-          <a href="/scanner/archive" class="menu-item">Archive</a>
-          <a href="/scanner/stats" class="menu-item">Stats</a>
-          <a href="/scanner/heatmap" class="menu-item">Heat Map</a>
-          <a href="/scanner/training" class="menu-item">Training Info</a>
-          <a href="/scanner/review" class="menu-item">Review Edits</a>
-          <button type="button" data-ask-ned-open class="menu-item">Open Chatbot</button>
-          <div class="my-1 border-t border-slate-700/80"></div>
-          <button id="notif-settings-btn-mobile" type="button" class="menu-item flex items-center gap-2">
-            <span>🔔</span> Notifications
-          </button>
-          <div class="my-1 border-t border-slate-700/80"></div>
-          <div id="auth-status-button"></div>
-        </div>
       </div>
     </div>
   </div>

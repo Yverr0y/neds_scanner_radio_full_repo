@@ -40,42 +40,6 @@
 
     /* === REMOVED: Ticker animation === */
 
-    /* === Push notification bell button === */
-    #push-btn { font-size:1.1rem; line-height:1; }
-    #push-btn.push-active { border-color:#38bdf8; color:#38bdf8; }
-
-    /* === Notification overlay channel toggles === */
-    .notif-town-header {
-      font-size:0.6rem; letter-spacing:0.28em; text-transform:uppercase;
-      color:#64748b; padding:0.5rem 0.25rem 0.25rem;
-    }
-    .notif-channel-row {
-      display:flex; align-items:center; justify-content:space-between;
-      padding:0.55rem 0.5rem; border-radius:0.5rem;
-      transition:background .15s;
-    }
-    .notif-channel-row:hover { background:rgba(255,255,255,0.04); }
-    .notif-channel-label { display:flex; align-items:center; gap:0.5rem; font-size:0.875rem; color:#e2e8f0; }
-    .notif-type-dot {
-      width:8px; height:8px; border-radius:999px; flex-shrink:0;
-    }
-    .dot-police { background:#38bdf8; }
-    .dot-fire   { background:#fb7185; }
-    /* Toggle switch */
-    .notif-toggle { position:relative; width:36px; height:20px; flex-shrink:0; }
-    .notif-toggle input { opacity:0; width:0; height:0; position:absolute; }
-    .notif-toggle-track {
-      position:absolute; inset:0; border-radius:999px;
-      background:#334155; transition:background .2s; cursor:pointer;
-    }
-    .notif-toggle input:checked + .notif-toggle-track { background:#0284c7; }
-    .notif-toggle-track::after {
-      content:''; position:absolute; top:3px; left:3px;
-      width:14px; height:14px; border-radius:999px;
-      background:white; transition:transform .2s;
-    }
-    .notif-toggle input:checked + .notif-toggle-track::after { transform:translateX(16px); }
-
     /* === Menu dropdown === */
     .menu-item {
       display:block; padding:0.5rem 1rem;
@@ -377,51 +341,4 @@
       <div id="town-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>
     </section>
   </div>
-{% endblock %}
-
-{% block body_after_main %}
-<!-- ===== Notifications Settings Overlay ===== -->
-<div id="notif-overlay" class="hidden fixed inset-0 z-[100] flex items-end sm:items-center justify-center">
-  <!-- Backdrop -->
-  <div id="notif-backdrop" class="absolute inset-0 bg-black/60 backdrop-blur-sm"></div>
-
-  <!-- Panel -->
-  <div class="relative w-full sm:max-w-md mx-auto bg-[#111827] border border-slate-700 rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[85vh]"
-       role="dialog" aria-modal="true" aria-labelledby="notif-title" aria-describedby="notif-description" tabindex="-1">
-
-    <!-- Header -->
-    <div class="flex items-center justify-between px-5 py-4 border-b border-slate-700 shrink-0">
-      <div>
-        <h2 id="notif-title" class="text-base font-semibold text-white">🔔 Notification Channels</h2>
-        <p id="notif-description" class="text-xs text-slate-400 mt-0.5">Choose which feeds send you alerts.</p>
-      </div>
-      <button id="notif-close" type="button" class="text-slate-400 hover:text-white text-xl leading-none" aria-label="Close notification settings">&times;</button>
-    </div>
-
-    <!-- Permission banner (shown when permission isn't granted yet) -->
-    <div id="notif-permission-banner" class="hidden mx-4 mt-3 px-4 py-3 rounded-lg bg-amber-900/40 border border-amber-700/50 text-amber-300 text-sm shrink-0">
-      <strong>Permission required.</strong> Enable browser notifications to receive alerts.
-      <button id="notif-grant-btn" class="ml-2 underline hover:text-white">Grant permission</button>
-    </div>
-
-    <!-- Channel list -->
-    <div id="notif-channel-list" class="overflow-y-auto px-4 py-3 space-y-1 flex-1">
-      <p class="text-slate-400 text-sm">Loading channels…</p>
-    </div>
-
-    <!-- Footer -->
-    <div class="px-5 py-4 border-t border-slate-700 flex items-center justify-between gap-3 shrink-0">
-      <div class="flex gap-2">
-        <button id="notif-select-all" class="text-xs text-sky-400 hover:text-sky-300 underline">All</button>
-        <span class="text-slate-600">|</span>
-        <button id="notif-select-none" class="text-xs text-sky-400 hover:text-sky-300 underline">None</button>
-      </div>
-      <div class="flex gap-2">
-        <button id="notif-save" class="px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-500 text-white text-sm font-medium transition">Save</button>
-        <button id="notif-cancel" class="px-4 py-1.5 rounded-md border border-slate-600 text-slate-300 hover:text-white text-sm transition">Cancel</button>
-      </div>
-    </div>
-  </div>
-</div>
-
 {% endblock %}

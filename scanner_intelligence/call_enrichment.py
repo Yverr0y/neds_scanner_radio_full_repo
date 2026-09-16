@@ -15,6 +15,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from shared.ai_availability import AIServiceUnavailable
+
 from .daily_take import (
     DEFAULT_DB_PATH,
     PROMPT_VERSION,
@@ -391,6 +393,20 @@ def process_call_enrichment_batch(
         results = generator(candidates)
         if not isinstance(results, list):
             raise ValueError("call enrichment generator must return a list")
+    except AIServiceUnavailable as exc:
+        logger.warning("call_enrichment.ai_unavailable batch_deferred=%s", len(candidates))
+        with _connect(storage_path) as conn:
+            ensure_intelligence_schema(conn)
+            _release_failed_batch(conn, candidates, str(exc), now_iso)
+        return {
+            "ok": True,
+            "degraded": True,
+            "selected": len(candidates),
+            "completed": 0,
+            "failed": 0,
+            "deferred": len(candidates),
+            "error": str(exc),
+        }
     except Exception as exc:
         logger.exception("call_enrichment.batch_failed")
         with _connect(storage_path) as conn:

@@ -28,12 +28,14 @@ import logging
 import os
 import sqlite3
 import copy
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from flask import Flask, jsonify, request
 from scanner_intelligence import get_or_generate_daily_take
+from shared.ai_availability import AIServiceUnavailable
 from shared.transcript_quality import repetition_hallucination_metrics
 
 logger = logging.getLogger("scanner_chatbot")
@@ -53,6 +55,48 @@ SCANNER_DB_PATH = os.environ.get(
 )
 CHAT_MAX_TOOL_ROUNDS = int(os.environ.get("CHAT_MAX_TOOL_ROUNDS", "4"))
 REQUEST_TIMEOUT_SECONDS = int(os.environ.get("VLLM_TIMEOUT_SECONDS", "120"))
+VLLM_UNAVAILABLE_BACKOFF_SECONDS = max(
+    30,
+    int(os.environ.get("VLLM_UNAVAILABLE_BACKOFF_SECONDS", "300")),
+)
+_vllm_unavailable_until = 0.0
+
+
+def vllm_in_backoff() -> bool:
+    return time.monotonic() < _vllm_unavailable_until
+
+
+def _mark_vllm_unavailable() -> None:
+    global _vllm_unavailable_until
+    _vllm_unavailable_until = time.monotonic() + VLLM_UNAVAILABLE_BACKOFF_SECONDS
+
+
+def _mark_vllm_available() -> None:
+    global _vllm_unavailable_until
+    _vllm_unavailable_until = 0.0
+
+
+def _post_vllm(url: str, payload: Dict[str, Any], timeout_seconds: int):
+    if vllm_in_backoff():
+        raise AIServiceUnavailable("The local AI service is temporarily offline.")
+    try:
+        response = requests.post(
+            url,
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=timeout_seconds,
+        )
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        _mark_vllm_unavailable()
+        raise AIServiceUnavailable(
+            "The local AI service is temporarily offline."
+        ) from exc
+    if response.status_code == 429 or response.status_code >= 500:
+        _mark_vllm_unavailable()
+        raise AIServiceUnavailable(
+            "The local AI service is temporarily offline."
+        )
+    return response
 
 
 def load_default_chat_model_from_catalog() -> Optional[str]:
@@ -1267,12 +1311,8 @@ def call_vllm_chat(
         payload["tool_choice"] = "auto"
 
     url = f"{VLLM_BASE_URL}/chat/completions"
-    response = requests.post(
-        url,
-        headers={"Content-Type": "application/json"},
-        json=payload,
-        timeout=timeout_seconds or REQUEST_TIMEOUT_SECONDS,
-    )
+    request_timeout = timeout_seconds or REQUEST_TIMEOUT_SECONDS
+    response = _post_vllm(url, payload, request_timeout)
 
     if response.status_code == 404:
         try:
@@ -1289,14 +1329,10 @@ def call_vllm_chat(
                 old_model,
                 VLLM_MODEL,
             )
-            response = requests.post(
-                url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=timeout_seconds or REQUEST_TIMEOUT_SECONDS,
-            )
+            response = _post_vllm(url, payload, request_timeout)
 
     response.raise_for_status()
+    _mark_vllm_available()
     return response.json()
 
 
@@ -1516,6 +1552,8 @@ Required shape:
                 else {}
             )
             break
+        except AIServiceUnavailable:
+            raise
         except (requests.RequestException, json.JSONDecodeError, ValueError) as exc:
             if attempt_number >= len(attempts):
                 raise

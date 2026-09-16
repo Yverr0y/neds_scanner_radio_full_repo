@@ -98,237 +98,347 @@ window.addEventListener('appinstalled', () => {
     });
 })();
 
-// --- Push Notification Subscribe / Unsubscribe ---
+// --- Scanner alert setup (shared by the browser and installed PWA) ---
 
-/**
- * Convert a base64url string to a Uint8Array (required by pushManager.subscribe).
- */
+const NOTIFICATION_FEEDS_STORAGE = 'scanner_notification_feeds_v2';
+const NOTIFICATION_MESSAGE_MODE_STORAGE = 'scanner_notification_message_mode_v1';
+const DEFAULT_NOTIFICATION_FEEDS = ['pd', 'fd', 'mpd', 'mfd'];
+const DEFAULT_NOTIFICATION_MESSAGE_MODE = 'transcript';
+let currentNotificationState = {
+    supported: false,
+    permission: 'default',
+    subscribed: false,
+    subscription: null,
+};
+
 function _urlBase64ToUint8Array(base64String) {
     const padding = '='.repeat((4 - base64String.length % 4) % 4);
     const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
     const rawData = atob(base64);
-    return Uint8Array.from([...rawData].map(c => c.charCodeAt(0)));
+    return Uint8Array.from([...rawData].map(character => character.charCodeAt(0)));
 }
 
-/**
- * Fetch the VAPID public key from the server.
- */
-async function _getVapidPublicKey() {
-    const res = await fetch('/scanner/push/vapid_public');
-    if (!res.ok) throw new Error('Could not fetch VAPID public key');
-    return (await res.text()).trim();
+function notificationSupported() {
+    return 'Notification' in window && 'serviceWorker' in navigator && 'PushManager' in window;
 }
 
-/**
- * Subscribe this browser to push notifications and save to the server.
- * Returns the PushSubscription object on success, null on failure.
- */
-async function subscribeToPush() {
-    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
-        console.warn('[Push] Push API not supported in this browser.');
-        return null;
-    }
-
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') {
-        console.warn('[Push] Notification permission denied.');
-        return null;
-    }
-
+function savedNotificationFeeds() {
     try {
-        const reg = await swReady();
-        const vapidKey = await _getVapidPublicKey();
-        const applicationServerKey = _urlBase64ToUint8Array(vapidKey);
+        const saved = JSON.parse(localStorage.getItem(NOTIFICATION_FEEDS_STORAGE) || 'null');
+        return Array.isArray(saved) ? saved : null;
+    } catch (_) {
+        return null;
+    }
+}
 
-        const subscription = await reg.pushManager.subscribe({
+function rememberNotificationFeeds(feeds) {
+    localStorage.setItem(NOTIFICATION_FEEDS_STORAGE, JSON.stringify(feeds));
+}
+
+function savedNotificationMessageMode() {
+    const mode = localStorage.getItem(NOTIFICATION_MESSAGE_MODE_STORAGE);
+    return ['alert_only', 'transcript'].includes(mode) ? mode : null;
+}
+
+function rememberNotificationMessageMode(mode) {
+    localStorage.setItem(NOTIFICATION_MESSAGE_MODE_STORAGE, mode);
+}
+
+async function fetchJson(url, options) {
+    const response = await fetch(url, options);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+    return data;
+}
+
+async function getNotificationState() {
+    const supported = notificationSupported();
+    if (!supported) {
+        return { supported: false, permission: 'unsupported', subscribed: false, subscription: null };
+    }
+    let subscription = null;
+    try {
+        const registration = await swReady();
+        subscription = await registration.pushManager.getSubscription();
+    } catch (error) {
+        console.warn('[Alerts] Could not inspect subscription:', error);
+    }
+    return {
+        supported: true,
+        permission: Notification.permission,
+        subscribed: Boolean(subscription && Notification.permission === 'granted'),
+        subscription,
+    };
+}
+
+async function getVapidPublicKey() {
+    const response = await fetch('/scanner/push/vapid_public', { cache: 'no-store' });
+    if (!response.ok) throw new Error('Alert service is not configured.');
+    return (await response.text()).trim();
+}
+
+async function enableNotifications(feeds, messageMode) {
+    if (!notificationSupported()) throw new Error('This browser does not support scanner alerts.');
+    if (Notification.permission === 'denied') {
+        throw new Error('Alerts are blocked in browser settings.');
+    }
+    if (Notification.permission !== 'granted') {
+        const permission = await Notification.requestPermission();
+        if (permission !== 'granted') throw new Error('Alerts were not enabled.');
+    }
+
+    const registration = await swReady();
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+        const applicationServerKey = _urlBase64ToUint8Array(await getVapidPublicKey());
+        subscription = await registration.pushManager.subscribe({
             userVisibleOnly: true,
             applicationServerKey,
         });
-
-        // Send subscription to server
-        await fetch('/scanner/push/subscribe', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(subscription.toJSON()),
-        });
-
-        localStorage.setItem('push_subscribed', '1');
-        console.log('[Push] Subscribed successfully.');
-        return subscription;
-    } catch (err) {
-        console.error('[Push] Subscription failed:', err);
-        return null;
     }
+
+    await fetchJson('/scanner/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            subscription: subscription.toJSON(),
+            feeds,
+            message_mode: messageMode,
+        }),
+    });
+    rememberNotificationFeeds(feeds);
+    rememberNotificationMessageMode(messageMode);
+    return subscription;
 }
 
-/**
- * Unsubscribe this browser from push notifications.
- */
-async function unsubscribeFromPush() {
-    if (!('serviceWorker' in navigator)) return;
-    try {
-        const reg = await swReady();
-        const subscription = await reg.pushManager.getSubscription();
-        if (subscription) {
-            await fetch('/scanner/push/unsubscribe', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ endpoint: subscription.endpoint }),
-            });
-            await subscription.unsubscribe();
-        }
-        localStorage.removeItem('push_subscribed');
-        console.log('[Push] Unsubscribed successfully.');
-    } catch (err) {
-        console.error('[Push] Unsubscribe failed:', err);
-    }
+async function saveNotificationPreferences(subscription, feeds, messageMode) {
+    await fetchJson('/scanner/push/prefs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            endpoint: subscription.endpoint,
+            feeds,
+            message_mode: messageMode,
+        }),
+    });
+    rememberNotificationFeeds(feeds);
+    rememberNotificationMessageMode(messageMode);
 }
 
-/**
- * Update the bell button appearance to reflect the current subscription state.
- */
-function _updateBellButton(btn, subscribed) {
-    if (!btn) return;
-    if (subscribed) {
-        btn.textContent = '🔔';
-        btn.title = 'Push notifications ON — click to disable';
-        btn.setAttribute('aria-label', 'Disable push notifications for new calls');
-        btn.setAttribute('aria-pressed', 'true');
-        btn.classList.add('push-active');
-    } else {
-        btn.textContent = '🔕';
-        btn.title = 'Enable push notifications for new calls';
-        btn.setAttribute('aria-label', 'Enable push notifications for new calls');
-        btn.setAttribute('aria-pressed', 'false');
-        btn.classList.remove('push-active');
-    }
+async function disableNotifications(subscription) {
+    if (!subscription) return;
+    await fetchJson('/scanner/push/unsubscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ endpoint: subscription.endpoint }),
+    });
+    await subscription.unsubscribe();
 }
 
-/**
- * Wire up the #push-btn bell button.
- * Call this once the DOM is ready (DOMContentLoaded or after template renders).
- */
-async function initPushButton() {
-    if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
-        // Push not supported — hide the button
-        const btn = document.getElementById('push-btn');
-        if (btn) btn.style.display = 'none';
-        return;
-    }
-
-    const btn = document.getElementById('push-btn');
-    if (!btn) return;
-
-    // Detect current subscription state
-    let isSubscribed = false;
-    try {
-        const reg = await swReady();
-        const sub = await reg.pushManager.getSubscription();
-        isSubscribed = !!sub && Notification.permission === 'granted';
-    } catch (_) { /* ignore */ }
-
-    _updateBellButton(btn, isSubscribed);
-    btn.style.display = 'inline-flex';
-
-    btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        if (isSubscribed) {
-            await unsubscribeFromPush();
-            isSubscribed = false;
-        } else {
-            const sub = await subscribeToPush();
-            isSubscribed = !!sub;
-        }
-        _updateBellButton(btn, isSubscribed);
-        btn.disabled = false;
+function updateNotificationControls(state) {
+    const label = !state.supported
+        ? 'Unavailable'
+        : state.permission === 'denied'
+            ? 'Blocked'
+            : state.subscribed ? 'On' : 'Off';
+    document.querySelectorAll('[data-notification-status]').forEach(element => {
+        element.textContent = label;
+    });
+    document.querySelectorAll('[data-notification-control]').forEach(element => {
+        element.classList.toggle('notification-control-active', state.subscribed);
+        element.classList.toggle('notification-control-blocked', state.permission === 'denied');
+        element.setAttribute('aria-label', `Open scanner alert settings. Alerts are ${label.toLowerCase()}.`);
     });
 }
 
-// Auto-initialise when DOM is ready
-// Use both DOMContentLoaded AND window load as a fallback so initNotifOverlay
-// always runs regardless of which defer script executes first.
-function _initAll() {
-    const installButton = document.getElementById('install-btn');
-    if (installButton && installButton.dataset.installBound !== '1') {
-        installButton.dataset.installBound = '1';
-        installButton.addEventListener('click', handleInstallButtonClick);
-    }
-    if (isStandalonePwa()) {
-        document.body.classList.add('pwa-standalone');
-    }
-    setInstallButtonState(!!deferredInstallPrompt);
-    initPushButton();
-    initNotifOverlay();
+async function refreshNotificationControls() {
+    currentNotificationState = await getNotificationState();
+    updateNotificationControls(currentNotificationState);
+    return currentNotificationState;
 }
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', _initAll);
-} else {
-    // Already past DOMContentLoaded — run now but also schedule via
-    // window.load in case the other defer script hasn't fired yet.
-    _initAll();
+
+function escapeNotificationHTML(value) {
+    return String(value ?? '').replace(/[&<>"']/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[character]);
 }
-// Safety net: re-run on load so event listeners are always attached
-window.addEventListener('load', _initAll, { once: true });
 
-// ----------------------------------------------------------------
-// Notifications Settings Overlay
-// ----------------------------------------------------------------
-
-async function initNotifOverlay() {
-    const overlay      = document.getElementById('notif-overlay');
-    const openBtn      = document.getElementById('notif-settings-btn');
-    const mobileOpenBtn = document.getElementById('notif-settings-btn-mobile');
-
-    if (!overlay || (!openBtn && !mobileOpenBtn)) return;
-    if (overlay.dataset.notifInitialised === '1') return;
+function initNotificationDialog() {
+    const overlay = document.getElementById('notif-overlay');
+    if (!overlay || overlay.dataset.notifInitialised === '1') return;
     overlay.dataset.notifInitialised = '1';
 
-    const backdrop     = document.getElementById('notif-backdrop');
-    const closeBtn     = document.getElementById('notif-close');
-    const cancelBtn    = document.getElementById('notif-cancel');
-    const saveBtn      = document.getElementById('notif-save');
-    const selectAll    = document.getElementById('notif-select-all');
-    const selectNone   = document.getElementById('notif-select-none');
-    const channelList  = document.getElementById('notif-channel-list');
-    const permBanner   = document.getElementById('notif-permission-banner');
-    const grantBtn     = document.getElementById('notif-grant-btn');
-    const dialog       = overlay.querySelector('[role="dialog"]');
-
-    let channels = [];   // populated on first open
-    let currentEndpoint = null;
+    const dialog = overlay.querySelector('[role="dialog"]');
+    const backdrop = document.getElementById('notif-backdrop');
+    const closeButton = document.getElementById('notif-close');
+    const cancelButton = document.getElementById('notif-cancel');
+    const primaryButton = document.getElementById('notif-primary');
+    const disableButton = document.getElementById('notif-disable');
+    const channelList = document.getElementById('notif-channel-list');
+    const selectionSummary = document.getElementById('notif-selection-summary');
+    const statusLabel = document.getElementById('notif-status-label');
+    const statusTitle = document.getElementById('notif-status-title');
+    const statusCopy = document.getElementById('notif-status-copy');
+    const statusCard = document.getElementById('notif-status-card');
+    const message = document.getElementById('notif-message');
+    let channels = [];
     let previousFocus = null;
 
-    // ---- helpers ----
-    const openOverlay = () => {
+    function selectedFeeds() {
+        return [...channelList.querySelectorAll('.notif-feed-input:checked')]
+            .map(input => input.dataset.feed);
+    }
+
+    function selectedMessageMode() {
+        return overlay.querySelector('input[name="notif-message-mode"]:checked')?.value
+            || DEFAULT_NOTIFICATION_MESSAGE_MODE;
+    }
+
+    function setMessage(text, kind = '') {
+        message.textContent = text;
+        message.className = `notif-message${kind ? ` is-${kind}` : ''}`;
+    }
+
+    function syncTownToggles() {
+        channelList.querySelectorAll('.notif-town-input').forEach(townInput => {
+            const inputs = [...channelList.querySelectorAll(`.notif-feed-input[data-town="${townInput.dataset.town}"]`)];
+            const checked = inputs.filter(input => input.checked).length;
+            townInput.checked = checked === inputs.length && inputs.length > 0;
+            townInput.indeterminate = checked > 0 && checked < inputs.length;
+        });
+    }
+
+    function updateSelectionSummary() {
+        syncTownToggles();
+        const feeds = selectedFeeds();
+        const towns = new Set(channels.filter(channel => feeds.includes(channel.id)).map(channel => channel.town));
+        selectionSummary.textContent = feeds.length
+            ? `${feeds.length} feed${feeds.length === 1 ? '' : 's'} across ${towns.size} town${towns.size === 1 ? '' : 's'}`
+            : 'Choose at least one feed';
+        primaryButton.disabled = !currentNotificationState.supported || currentNotificationState.permission === 'denied' || feeds.length === 0;
+        rememberNotificationFeeds(feeds);
+    }
+
+    function renderChannels(selected) {
+        const towns = new Map();
+        channels.forEach(channel => {
+            if (!towns.has(channel.town)) towns.set(channel.town, []);
+            towns.get(channel.town).push(channel);
+        });
+        channelList.innerHTML = [...towns.entries()].map(([town, townChannels]) => {
+            const townKey = town.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+            const choices = townChannels.map(channel => {
+                const department = channel.type === 'fire' ? 'Fire' : 'Police';
+                return `<label class="notif-feed-choice">
+                    <input class="notif-feed-input" type="checkbox" data-feed="${escapeNotificationHTML(channel.id)}" data-town="${escapeNotificationHTML(townKey)}" ${selected.includes(channel.id) ? 'checked' : ''}>
+                    <span class="notif-type-dot ${channel.type === 'fire' ? 'dot-fire' : 'dot-police'}" aria-hidden="true"></span>
+                    <span>${department}</span>
+                </label>`;
+            }).join('');
+            return `<fieldset class="notif-town-group">
+                <legend class="sr-only">${escapeNotificationHTML(town)} alerts</legend>
+                <label class="notif-town-choice">
+                    <input class="notif-town-input" type="checkbox" data-town="${escapeNotificationHTML(townKey)}">
+                    <span>${escapeNotificationHTML(town)}</span>
+                </label>
+                <div class="notif-feed-choices">${choices}</div>
+            </fieldset>`;
+        }).join('');
+        updateSelectionSummary();
+    }
+
+    function renderStatus(state) {
+        statusCard.classList.toggle('is-on', state.subscribed);
+        statusCard.classList.toggle('is-blocked', state.permission === 'denied');
+        disableButton.classList.toggle('hidden', !state.subscribed);
+        if (!state.supported) {
+            statusLabel.textContent = 'Unavailable';
+            statusTitle.textContent = 'Alerts are not supported here';
+            statusCopy.textContent = 'Try the current version of Chrome, Edge, Firefox, or Safari.';
+            primaryButton.textContent = 'Alerts unavailable';
+        } else if (state.permission === 'denied') {
+            statusLabel.textContent = 'Blocked';
+            statusTitle.textContent = 'Allow alerts in browser settings';
+            statusCopy.textContent = 'Open this site’s permissions, allow notifications, then return here.';
+            primaryButton.textContent = 'Blocked in settings';
+        } else if (state.subscribed) {
+            statusLabel.textContent = 'On for this device';
+            statusTitle.textContent = 'Local scanner alerts are active';
+            statusCopy.textContent = 'We group activity by feed and limit alert frequency.';
+            primaryButton.textContent = 'Save preferences';
+        } else {
+            statusLabel.textContent = 'Off';
+            statusTitle.textContent = 'Get only the local alerts you choose';
+            statusCopy.textContent = 'Your browser asks for permission only after you select Turn on alerts.';
+            primaryButton.textContent = 'Turn on alerts';
+        }
+        updateSelectionSummary();
+    }
+
+    async function loadDialog() {
+        channelList.innerHTML = '<p class="notif-loading">Loading local feeds…</p>';
+        setMessage('');
+        primaryButton.disabled = true;
+        try {
+            const [channelData, state] = await Promise.all([
+                fetchJson('/scanner/push/channels', { cache: 'no-store' }),
+                refreshNotificationControls(),
+            ]);
+            channels = channelData.channels || [];
+            let feeds = savedNotificationFeeds();
+            let messageMode = savedNotificationMessageMode() || DEFAULT_NOTIFICATION_MESSAGE_MODE;
+            if (state.subscribed && state.subscription) {
+                try {
+                    const preferences = await fetchJson(`/scanner/push/prefs?endpoint=${encodeURIComponent(state.subscription.endpoint)}`, { cache: 'no-store' });
+                    feeds = preferences.feeds;
+                    messageMode = preferences.message_mode || messageMode;
+                } catch (error) {
+                    console.warn('[Alerts] Could not load saved preferences:', error);
+                }
+            }
+            const messageModeInput = overlay.querySelector(`input[name="notif-message-mode"][value="${messageMode}"]`);
+            if (messageModeInput) messageModeInput.checked = true;
+            rememberNotificationMessageMode(messageMode);
+            const validIds = new Set(channels.map(channel => channel.id));
+            const selected = (feeds || DEFAULT_NOTIFICATION_FEEDS).filter(feed => validIds.has(feed));
+            renderChannels(selected);
+            renderStatus(state);
+        } catch (error) {
+            console.error('[Alerts] Setup failed:', error);
+            channelList.innerHTML = '<p class="notif-loading is-error">Local feeds could not be loaded.</p>';
+            setMessage('Close this panel and try again.', 'error');
+        }
+    }
+
+    function openDialog(event) {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
         const activeElement = document.activeElement;
         previousFocus = activeElement && activeElement.closest?.('#menu-dropdown')
             ? document.getElementById('mobile-more-btn')
             : activeElement;
         window.setScannerMoreMenuOpen?.(false);
         overlay.classList.remove('hidden');
-        requestAnimationFrame(() => (closeBtn || dialog)?.focus());
-    };
-    const closeOverlay = () => {
+        requestAnimationFrame(() => closeButton.focus());
+        loadDialog();
+    }
+
+    function closeDialog() {
         overlay.classList.add('hidden');
         if (previousFocus instanceof HTMLElement) previousFocus.focus();
         previousFocus = null;
-    };
+    }
 
-    function _trapDialogFocus(event) {
+    function trapDialogFocus(event) {
         if (event.key === 'Escape') {
             event.preventDefault();
-            closeOverlay();
+            closeDialog();
             return;
         }
         if (event.key !== 'Tab') return;
-        const focusable = [...dialog.querySelectorAll(
-            'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-        )].filter((element) => !element.closest('.hidden'));
-        if (!focusable.length) {
-            event.preventDefault();
-            dialog.focus();
-            return;
-        }
+        const focusable = [...dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+            .filter(element => !element.closest('.hidden'));
+        if (!focusable.length) return;
         const first = focusable[0];
         const last = focusable[focusable.length - 1];
         if (event.shiftKey && document.activeElement === first) {
@@ -340,199 +450,115 @@ async function initNotifOverlay() {
         }
     }
 
-    function _toggleIds() {
-        return [...overlay.querySelectorAll('.notif-toggle-input')]
-            .filter(cb => cb.checked)
-            .map(cb => cb.dataset.feed);
-    }
+    document.querySelectorAll('[data-notification-control]').forEach(button => button.addEventListener('click', openDialog));
+    closeButton.addEventListener('click', closeDialog);
+    cancelButton.addEventListener('click', closeDialog);
+    backdrop.addEventListener('click', closeDialog);
+    dialog.addEventListener('keydown', trapDialogFocus);
 
-    function _renderChannels(channels, savedFeeds) {
-        if (!channelList) return;
-        channelList.innerHTML = '';
-
-        // Group by town
-        const towns = {};
-        for (const ch of channels) {
-            if (!towns[ch.town]) towns[ch.town] = [];
-            towns[ch.town].push(ch);
+    channelList.addEventListener('change', event => {
+        const townInput = event.target.closest('.notif-town-input');
+        if (townInput) {
+            channelList.querySelectorAll(`.notif-feed-input[data-town="${townInput.dataset.town}"]`)
+                .forEach(input => { input.checked = townInput.checked; });
         }
+        setMessage('');
+        updateSelectionSummary();
+    });
 
-        const allSelected = savedFeeds.length === 0; // empty = all
+    overlay.querySelectorAll('input[name="notif-message-mode"]').forEach(input => {
+        input.addEventListener('change', () => {
+            rememberNotificationMessageMode(selectedMessageMode());
+            setMessage('');
+        });
+    });
 
-        for (const [town, feeds] of Object.entries(towns)) {
-            const header = document.createElement('p');
-            header.className = 'notif-town-header';
-            header.textContent = town;
-            channelList.appendChild(header);
+    document.getElementById('notif-quick-select').addEventListener('click', event => {
+        const button = event.target.closest('[data-notif-select]');
+        if (!button) return;
+        const mode = button.dataset.notifSelect;
+        channelList.querySelectorAll('.notif-feed-input').forEach(input => {
+            const channel = channels.find(item => item.id === input.dataset.feed);
+            input.checked = mode === 'all' || channel?.type === mode;
+        });
+        setMessage('');
+        updateSelectionSummary();
+    });
 
-            for (const ch of feeds) {
-                const isChecked = allSelected || savedFeeds.includes(ch.id);
-                const row = document.createElement('div');
-                row.className = 'notif-channel-row';
-                row.innerHTML = `
-                    <label class="notif-channel-label" for="notif-ch-${ch.id}">
-                        <span class="notif-type-dot ${ch.type === 'police' ? 'dot-police' : 'dot-fire'}"></span>
-                        ${ch.label}
-                    </label>
-                    <label class="notif-toggle">
-                        <input type="checkbox" id="notif-ch-${ch.id}"
-                               class="notif-toggle-input"
-                               data-feed="${ch.id}"
-                               ${isChecked ? 'checked' : ''}>
-                        <span class="notif-toggle-track"></span>
-                    </label>`;
-                channelList.appendChild(row);
-            }
-        }
-    }
-
-    async function _loadAndRender() {
-        channelList.innerHTML = '<p class="text-slate-400 text-sm">Loading channels…</p>';
-
-        // Fetch channel list
-        try {
-            const res = await fetch('/scanner/push/channels');
-            const data = await res.json();
-            channels = data.channels || [];
-        } catch (e) {
-            channelList.innerHTML = '<p class="text-red-400 text-sm">Could not load channels.</p>';
+    primaryButton.addEventListener('click', async () => {
+        const feeds = selectedFeeds();
+        const messageMode = selectedMessageMode();
+        if (!feeds.length) {
+            setMessage('Choose at least one Police or Fire feed.', 'error');
+            channelList.querySelector('input')?.focus();
             return;
         }
-
-        // Get current endpoint
-        currentEndpoint = null;
+        primaryButton.disabled = true;
+        disableButton.disabled = true;
+        setMessage(currentNotificationState.subscribed ? 'Saving your choices…' : 'Turning on alerts…');
         try {
-            const reg = await swReady();
-            const sub = await reg.pushManager.getSubscription();
-            if (sub) currentEndpoint = sub.endpoint;
-        } catch (_) {}
-
-        // Fetch saved prefs
-        let savedFeeds = [];
-        if (currentEndpoint) {
-            try {
-                const r = await fetch(`/scanner/push/prefs?endpoint=${encodeURIComponent(currentEndpoint)}`);
-                const d = await r.json();
-                savedFeeds = d.feeds || [];
-            } catch (_) {}
-        }
-
-        _renderChannels(channels, savedFeeds);
-    }
-
-    // ---- permission banner ----
-    function _updatePermBanner() {
-        if (!permBanner) return;
-        const notSupported = !('Notification' in window);
-        const granted = Notification.permission === 'granted';
-        permBanner.classList.toggle('hidden', notSupported || granted);
-    }
-
-    async function openSettingsOverlay(e) {
-        e?.stopPropagation?.();
-        openOverlay();
-        _updatePermBanner();
-        await _loadAndRender();
-    }
-
-    if (grantBtn) {
-        grantBtn.addEventListener('click', async () => {
-            await subscribeToPush();
-            _updatePermBanner();
-            await _loadAndRender();
-        });
-    }
-
-    // ---- open ----
-    openBtn?.addEventListener('click', openSettingsOverlay);
-    mobileOpenBtn?.addEventListener('click', openSettingsOverlay);
-
-    // ---- close ----
-    closeBtn?.addEventListener('click', closeOverlay);
-    cancelBtn?.addEventListener('click', closeOverlay);
-    backdrop?.addEventListener('click', closeOverlay);
-    dialog?.addEventListener('keydown', _trapDialogFocus);
-
-    // ---- select all / none ----
-    selectAll?.addEventListener('click', () => {
-        overlay.querySelectorAll('.notif-toggle-input').forEach(cb => cb.checked = true);
-    });
-    selectNone?.addEventListener('click', () => {
-        overlay.querySelectorAll('.notif-toggle-input').forEach(cb => cb.checked = false);
-    });
-
-    // ---- save ----
-    saveBtn?.addEventListener('click', async () => {
-        saveBtn.disabled = true;
-        saveBtn.textContent = 'Subscribing…';
-
-        try {
-            // If we don't have an endpoint yet, create a push subscription now.
-            if (!currentEndpoint) {
-                // Check permission first — request it if needed
-                if (Notification.permission === 'denied') {
-                    saveBtn.textContent = 'Notifications blocked';
-                    setTimeout(() => { saveBtn.textContent = 'Save'; saveBtn.disabled = false; }, 2500);
-                    return;
-                }
-                if (Notification.permission !== 'granted') {
-                    const perm = await Notification.requestPermission();
-                    if (perm !== 'granted') {
-                        saveBtn.textContent = 'Permission denied';
-                        setTimeout(() => { saveBtn.textContent = 'Save'; saveBtn.disabled = false; }, 2500);
-                        return;
-                    }
-                }
-                // Permission is granted — create the push subscription
-                try {
-                    const reg = await swReady();
-                    const vapidKey = await _getVapidPublicKey();
-                    const appServerKey = _urlBase64ToUint8Array(vapidKey);
-                    const newSub = await reg.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: appServerKey,
-                    });
-                    await fetch('/scanner/push/subscribe', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(newSub.toJSON()),
-                    });
-                    localStorage.setItem('push_subscribed', '1');
-                    currentEndpoint = newSub.endpoint;
-                } catch (subErr) {
-                    console.error('[NotifOverlay] pushManager.subscribe failed:', subErr);
-                    saveBtn.textContent = `Subscribe failed: ${subErr.message || subErr}`;
-                    setTimeout(() => { saveBtn.textContent = 'Save'; saveBtn.disabled = false; }, 4000);
-                    return;
-                }
+            if (currentNotificationState.subscribed && currentNotificationState.subscription) {
+                await saveNotificationPreferences(currentNotificationState.subscription, feeds, messageMode);
+            } else {
+                await enableNotifications(feeds, messageMode);
             }
-
-            saveBtn.textContent = 'Saving…';
-
-            const selected = _toggleIds();
-            // empty array = "all feeds" semantics
-            const toSave = selected.length === channels.length ? [] : selected;
-
-            await fetch('/scanner/push/prefs', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ endpoint: currentEndpoint, feeds: toSave }),
-            });
-
-            // Update bell button to reflect active subscription
-            const bellBtn = document.getElementById('push-btn');
-            _updateBellButton(bellBtn, true);
-
-            saveBtn.textContent = 'Saved ✓';
-            setTimeout(() => {
-                saveBtn.textContent = 'Save';
-                saveBtn.disabled = false;
-                closeOverlay();
-            }, 900);
-        } catch (e) {
-            console.error('[NotifOverlay] Save failed:', e);
-            saveBtn.textContent = 'Error — check console';
-            setTimeout(() => { saveBtn.textContent = 'Save'; saveBtn.disabled = false; }, 2500);
+            const state = await refreshNotificationControls();
+            renderStatus(state);
+            setMessage(
+                messageMode === 'transcript'
+                    ? 'Alerts will include a short transcript preview.'
+                    : 'Alerts will show the feed name without a transcript.',
+                'success',
+            );
+        } catch (error) {
+            console.error('[Alerts] Could not save setup:', error);
+            const state = await refreshNotificationControls();
+            renderStatus(state);
+            setMessage(error.message || 'Alerts could not be updated.', 'error');
+        } finally {
+            disableButton.disabled = false;
+            updateSelectionSummary();
         }
     });
+
+    disableButton.addEventListener('click', async () => {
+        disableButton.disabled = true;
+        primaryButton.disabled = true;
+        setMessage('Turning off alerts…');
+        try {
+            await disableNotifications(currentNotificationState.subscription);
+            const state = await refreshNotificationControls();
+            renderStatus(state);
+            setMessage('Alerts are off. Your feed choices stay saved on this device.', 'success');
+        } catch (error) {
+            console.error('[Alerts] Could not disable alerts:', error);
+            setMessage('Alerts could not be turned off. Please try again.', 'error');
+        } finally {
+            disableButton.disabled = false;
+            updateSelectionSummary();
+        }
+    });
+
+    if (new URLSearchParams(window.location.search).get('notifications') === '1') {
+        requestAnimationFrame(() => openDialog());
+    }
 }
+
+function initPwaExperience() {
+    const installButton = document.getElementById('install-btn');
+    if (installButton && installButton.dataset.installBound !== '1') {
+        installButton.dataset.installBound = '1';
+        installButton.addEventListener('click', handleInstallButtonClick);
+    }
+    if (isStandalonePwa()) document.body.classList.add('pwa-standalone');
+    setInstallButtonState(!!deferredInstallPrompt);
+    initNotificationDialog();
+    refreshNotificationControls();
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPwaExperience);
+} else {
+    initPwaExperience();
+}
+window.addEventListener('load', initPwaExperience, { once: true });

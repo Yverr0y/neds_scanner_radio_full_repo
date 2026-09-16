@@ -12,7 +12,8 @@ from flask import Blueprint, jsonify, request
 
 import chatbot.app as chatbot_app
 from scanner_intelligence import get_incident_detail, get_or_generate_daily_take
-from scanner_config import build_chat_preset_tool_call, get_chat_preset_catalog
+from scanner_config import TOWNS, build_chat_preset_tool_call, get_chat_preset_catalog
+from shared.ai_availability import AIServiceUnavailable
 
 
 chat_bp = Blueprint("scanner_chat", __name__)
@@ -191,6 +192,74 @@ def _answer_from_tool_result(tool_result: Dict[str, Any]) -> str:
     return json.dumps(tool_result, indent=2, default=str)
 
 
+def _take_citations(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    citations: List[Dict[str, Any]] = []
+
+    def collect(section: Dict[str, Any]) -> None:
+        for highlight in section.get("highlights") or []:
+            citations.extend(highlight.get("citations") or [])
+        for department in section.get("departments") or []:
+            collect(department)
+
+    take = result.get("take") or {}
+    collect(take)
+    for town in take.get("towns") or []:
+        collect(town)
+    return citations
+
+
+def _offline_chat_fallback(messages: List[Dict[str, str]]) -> Dict[str, Any]:
+    question = messages[-1]["content"] if messages else ""
+    normalized = question.casefold()
+    summary_requested = any(
+        phrase in normalized
+        for phrase in (
+            "summary",
+            "summarize",
+            "recap",
+            "ned's take",
+            "neds take",
+            "what happened",
+        )
+    )
+    if not summary_requested:
+        return {
+            "ok": True,
+            "degraded": True,
+            "ai_available": False,
+            "answer": (
+                "The AI assistant is temporarily offline. Scanner audio, "
+                "transcripts, the archive, and saved quick reports are still available."
+            ),
+            "citations": [],
+        }
+
+    town = next(
+        (
+            config["name"]
+            for slug, config in TOWNS.items()
+            if slug in normalized or config["name"].casefold() in normalized
+        ),
+        None,
+    )
+    result = get_or_generate_daily_take(
+        db_path=chatbot_app.SCANNER_DB_PATH,
+        day="today",
+        town=town,
+    )
+    return {
+        "ok": True,
+        "degraded": True,
+        "ai_available": False,
+        "answer": (
+            "AI commentary is temporarily offline, so here is the verified "
+            "scanner recap:\n\n"
+            + _answer_from_tool_result(result)
+        ),
+        "citations": _take_citations(result),
+    }
+
+
 @chat_bp.route("/scanner/api/chat/local", methods=["POST"])
 def api_chat_local():
     if _chat_rate_limited():
@@ -248,6 +317,24 @@ def api_chat_local():
         result.pop("raw", None)
         result.pop("tool_result", None)
         return jsonify(result), status
+    except AIServiceUnavailable:
+        logger.info("chat.local.ai_unavailable fallback=deterministic")
+        try:
+            return jsonify(_offline_chat_fallback(user_messages)), 200
+        except Exception:
+            logger.warning("chat.local.offline_fallback_failed", exc_info=True)
+            return jsonify(
+                {
+                    "ok": True,
+                    "degraded": True,
+                    "ai_available": False,
+                    "answer": (
+                        "The AI assistant is temporarily offline. Live scanner audio "
+                        "and the archive are still available."
+                    ),
+                    "citations": [],
+                }
+            ), 200
     except requests.HTTPError:
         logger.exception("chat.local.vllm_http_failed")
         return jsonify(

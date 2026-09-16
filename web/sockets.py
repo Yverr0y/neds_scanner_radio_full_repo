@@ -3,6 +3,7 @@ import logging
 import redis
 import json
 import datetime
+import os
 from flask import request
 from flask_socketio import SocketIO, emit
 
@@ -13,8 +14,6 @@ import push_utils
 
 from client_tracker import init_client_table, log_client_connection, fetch_client_geo
 
-init_client_table()  # Run once on startup
-
 # Will be initialized in app_socket.py via init_sockets
 socketio = SocketIO()
 r = None
@@ -22,6 +21,7 @@ ALL_FEEDS = []
 ALL_DEPARTMENT_IDS = []
 LOCAL_TIMEZONE = None
 logger = logging.getLogger('scanner_web')
+PUSH_COOLDOWN_SECONDS = max(60, int(os.environ.get('PUSH_COOLDOWN_SECONDS', '300')))
 
 
 # -------------------------
@@ -85,6 +85,40 @@ def handle_client_message(json_data):
 # -------------------------
 # Background Workers
 # -------------------------
+def _push_recipients(job):
+    """Return (subscription, message_mode) pairs for a queued push job."""
+    targeted_endpoints = job.get('targeted_endpoints')
+    endpoint_set = set(targeted_endpoints) if targeted_endpoints is not None else None
+    feed = job.get('feed', '')
+
+    if job.get('kind') == 'call_ready':
+        recipients = []
+        for subscription, feeds, message_mode in push_db.list_subscriptions_with_settings():
+            endpoint = subscription.get('endpoint')
+            if endpoint_set is not None and endpoint not in endpoint_set:
+                continue
+            if feeds is None or feed in feeds:
+                recipients.append((subscription, message_mode))
+        return recipients
+
+    subscriptions = push_db.list_subscriptions()
+    if endpoint_set is not None:
+        subscriptions = [
+            subscription for subscription in subscriptions
+            if subscription.get('endpoint') in endpoint_set
+        ]
+    return [(subscription, 'alert_only') for subscription in subscriptions]
+
+
+def _push_message(job, message_mode):
+    if job.get('kind') == 'call_ready':
+        transcript = ' '.join(str(job.get('transcript') or '').split())
+        if message_mode == 'transcript' and transcript:
+            return transcript
+        return 'A new scanner call is ready to listen.'
+    return job.get('message', 'New scanner call')
+
+
 def push_worker():
     worker_logger = logging.getLogger('scanner_web.push_worker')
     worker_logger.info("push_worker.start")
@@ -110,29 +144,39 @@ def push_worker():
             
             try:
                 job = json.loads(payload_str)
-                message_content = job.get('message', 'New scanner call')
                 title = job.get('title', 'Scanner Activity')
                 feed = job.get('feed', '')
-                targeted_endpoints = job.get('targeted_endpoints')  # None = send to all
+                recipients = _push_recipients(job)
 
-                if targeted_endpoints is not None:
-                    # Pre-filtered by new_call_watcher; look up full sub objects
-                    endpoint_set = set(targeted_endpoints)
-                    all_subs = push_db.list_subscriptions()
-                    subs = [s for s in all_subs if s.get('endpoint') in endpoint_set]
-                else:
-                    subs = push_db.list_subscriptions()
+                if job.get('kind') == 'call_ready' and recipients:
+                    cooldown_key = f'scanner:push:cooldown:{feed}'
+                    if not r.set(
+                        cooldown_key,
+                        job.get('call_id') or job.get('filename') or '1',
+                        nx=True,
+                        ex=PUSH_COOLDOWN_SECONDS,
+                    ):
+                        worker_logger.debug("push_worker.cooldown feed=%s", feed)
+                        continue
 
-                worker_logger.info("push_worker.job_start recipients=%s feed=%s", len(subs), feed or "-")
-
-                push_payload = {'title': title, 'message': message_content}
-                if feed:
-                    push_payload['feed'] = feed
+                worker_logger.info(
+                    "push_worker.job_start recipients=%s feed=%s",
+                    len(recipients),
+                    feed or "-",
+                )
 
                 success_count = 0
                 failed_count = 0
-                for sub in subs:
+                for sub, message_mode in recipients:
                     endpoint = sub.get('endpoint', 'unknown')
+                    push_payload = {
+                        'title': title,
+                        'message': _push_message(job, message_mode),
+                        'data': job.get('data') or {},
+                        'tag': job.get('tag') or '',
+                    }
+                    if feed:
+                        push_payload['feed'] = feed
                     try:
                         ok, err = push_utils.send_push(sub, push_payload, vapid_priv, vapid_claims)
                         if ok:
@@ -149,7 +193,7 @@ def push_worker():
 
                 worker_logger.info(
                     "push_worker.job_complete recipients=%s delivered=%s failed=%s",
-                    len(subs),
+                    len(recipients),
                     success_count,
                     failed_count,
                 )
@@ -230,72 +274,6 @@ def transmitting_worker():
         sleep_duration = 0.25 if active_found else 1.0
         socketio.sleep(sleep_duration)
 
-def new_call_watcher():
-    """Watches scanner:*:latest_time Redis keys for changes.
-    When a feed's latest_time advances, enqueues a push notification.
-    """
-    worker_logger = logging.getLogger('scanner_web.new_call_watcher')
-    worker_logger.info("new_call_watcher.start")
-
-    # Human-readable feed names for notification titles
-    FEED_NAMES = {
-        'pd': 'Hopedale PD', 'fd': 'Hopedale FD',
-        'mpd': 'Milford PD', 'mfd': 'Milford FD',
-        'bpd': 'Bellingham PD', 'bfd': 'Bellingham FD',
-        'mndpd': 'Mendon PD', 'mndfd': 'Mendon FD',
-        'uptpd': 'Upton PD', 'uptfd': 'Upton FD',
-        'blkpd': 'Blackstone PD', 'blkfd': 'Blackstone FD',
-        'frkpd': 'Franklin PD', 'frkfd': 'Franklin FD',
-        'milpd': 'Millis PD', 'milfd': 'Millis FD',
-        'medpd': 'Medway PD', 'medfd': 'Medway FD',
-        'foxpd': 'Foxborough PD', 'sfd': 'Southborough FD',
-    }
-
-    # Seed last-seen timestamps so we don't fire on startup
-    last_times = {}
-    try:
-        for key in r.scan_iter(match='scanner:*:latest_time'):
-            last_times[key] = r.get(key) or ''
-        worker_logger.info("new_call_watcher.seeded feeds=%s", len(last_times))
-    except Exception as e:
-        worker_logger.warning("new_call_watcher.seed_failed error=%s", e)
-
-    while True:
-        try:
-            for key in r.scan_iter(match='scanner:*:latest_time'):
-                try:
-                    current = r.get(key) or ''
-                    prev = last_times.get(key, '')
-                    if current and current != prev:
-                        last_times[key] = current
-                        feed = key.split(':')[1]
-                        feed_name = FEED_NAMES.get(feed, feed.upper())
-                        # Filter to subscribers who opted in to this feed
-                        # (empty prefs list = receive all feeds)
-                        subs_with_prefs = push_db.list_subscriptions_with_prefs()
-                        targeted = [
-                            sub for sub, prefs in subs_with_prefs
-                            if not prefs or feed in prefs
-                        ]
-                        if targeted:
-                            job = json.dumps({
-                                'title': f'📻 {feed_name}',
-                                'message': 'New call recorded',
-                                'feed': feed,
-                                'targeted_endpoints': [s.get('endpoint') for s in targeted],
-                            })
-                            r.lpush('push_queue', job)
-                            worker_logger.info("new_call_watcher.queued feed=%s subscribers=%s", feed, len(targeted))
-                except Exception as key_err:
-                    worker_logger.warning("new_call_watcher.key_failed key=%s error=%s", key, key_err)
-        except redis.RedisError as e:
-            worker_logger.error("new_call_watcher.redis_error error=%s", e)
-        except Exception as e:
-            worker_logger.error("new_call_watcher.unexpected_error error=%s", e)
-
-        socketio.sleep(5)  # Poll every 5 seconds
-
-
 def init_sockets(app, redis_client, all_feeds_list, all_department_ids_list, local_timezone):
     """Initializes the SocketIO extension and starts background workers."""
     global r, ALL_FEEDS, ALL_DEPARTMENT_IDS, LOCAL_TIMEZONE
@@ -303,6 +281,7 @@ def init_sockets(app, redis_client, all_feeds_list, all_department_ids_list, loc
     ALL_FEEDS = all_feeds_list
     ALL_DEPARTMENT_IDS = all_department_ids_list
     LOCAL_TIMEZONE = local_timezone
+    init_client_table()
     
     socketio.init_app(app, async_mode='eventlet', cors_allowed_origins="*")
     
@@ -310,4 +289,3 @@ def init_sockets(app, redis_client, all_feeds_list, all_department_ids_list, loc
     logger.info("socket_workers.start")
     socketio.start_background_task(target=push_worker)
     socketio.start_background_task(target=transmitting_worker)
-    socketio.start_background_task(target=new_call_watcher)

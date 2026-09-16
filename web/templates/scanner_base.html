@@ -109,6 +109,26 @@
 
 <div id="menu-backdrop" class="scanner-more-backdrop hidden" aria-hidden="true"></div>
 
+<div id="menu-dropdown"
+  class="hidden scanner-more-menu overflow-hidden rounded-2xl border border-slate-700/80 bg-[#0c1628]/96 py-2 shadow-2xl backdrop-blur-xl"
+  role="navigation"
+  aria-label="More scanner navigation">
+  <a href="/scanner/" class="menu-item">Home</a>
+  <a href="/scanner/archive" class="menu-item">Archive</a>
+  <a href="/scanner/stats" class="menu-item">Stats</a>
+  <a href="/scanner/heatmap" class="menu-item">Heat Map</a>
+  <a href="/scanner/training" class="menu-item">Training Info</a>
+  <a href="/scanner/review" class="menu-item">Review Edits</a>
+  <button type="button" data-ask-ned-open class="menu-item">Open Chatbot</button>
+  <div class="my-1 border-t border-slate-700/80"></div>
+  <button id="notif-settings-btn-mobile" type="button" class="menu-item notification-menu-item" data-notification-control>
+    <span class="notification-menu-label"><span aria-hidden="true">🔔</span> Alerts</span>
+    <span class="notification-control-status" data-notification-status>Off</span>
+  </button>
+  <div class="my-1 border-t border-slate-700/80"></div>
+  <div id="auth-status-button"></div>
+</div>
+
 <nav class="scanner-bottom-nav min-[1100px]:hidden" aria-label="Primary navigation">
   <a href="/scanner/" class="scanner-bottom-nav-item {{ 'is-active' if active_page == 'home' else '' }}" {% if active_page == 'home' %}aria-current="page"{% endif %}>
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5M5.5 10v10h13V10M9 20v-6h6v6"></path></svg>
@@ -133,6 +153,80 @@
     <span>More</span>
   </button>
 </nav>
+
+<div id="notif-overlay" class="notification-overlay hidden">
+  <div id="notif-backdrop" class="notification-backdrop"></div>
+  <section class="notification-dialog" role="dialog" aria-modal="true" aria-labelledby="notif-title" aria-describedby="notif-description" tabindex="-1">
+    <header class="notification-dialog-header">
+      <div>
+        <p class="notification-dialog-kicker">Scanner alerts</p>
+        <h2 id="notif-title">Stay close to local activity</h2>
+        <p id="notif-description">Choose the towns and departments you care about. We’ll send a short alert when a new call is ready.</p>
+      </div>
+      <button id="notif-close" class="notification-close" type="button" aria-label="Close scanner alert settings">&times;</button>
+    </header>
+
+    <div class="notification-dialog-body">
+      <section id="notif-status-card" class="notif-status-card" aria-live="polite">
+        <span class="notif-status-icon" aria-hidden="true">🔔</span>
+        <div>
+          <span id="notif-status-label" class="notif-status-label">Checking this device…</span>
+          <strong id="notif-status-title">Loading alert status</strong>
+          <p id="notif-status-copy">Your choices are stored for this browser or installed app.</p>
+        </div>
+      </section>
+
+      <fieldset class="notif-message-style">
+        <legend>What should the alert show?</legend>
+        <div class="notif-message-options">
+          <label class="notif-message-option">
+            <input type="radio" name="notif-message-mode" value="alert_only">
+            <span>
+              <strong>Alert only</strong>
+              <small>Feed name and a prompt to listen</small>
+            </span>
+          </label>
+          <label class="notif-message-option">
+            <input type="radio" name="notif-message-mode" value="transcript" checked>
+            <span>
+              <strong>Transcript preview</strong>
+              <small>Adds a short first-pass transcript</small>
+            </span>
+          </label>
+        </div>
+        <p>Previews can appear on your device’s lock screen.</p>
+      </fieldset>
+
+      <section class="notif-preferences" aria-labelledby="notif-preferences-title">
+        <div class="notif-preferences-heading">
+          <div>
+            <h3 id="notif-preferences-title">Your local feeds</h3>
+            <p id="notif-selection-summary">Choose at least one feed</p>
+          </div>
+          <div id="notif-quick-select" class="notif-quick-select" aria-label="Quick feed selection">
+            <button type="button" data-notif-select="all">All</button>
+            <button type="button" data-notif-select="police">Police</button>
+            <button type="button" data-notif-select="fire">Fire</button>
+            <button type="button" data-notif-select="clear">Clear</button>
+          </div>
+        </div>
+        <div id="notif-channel-list" class="notif-channel-grid">
+          <p class="notif-loading">Loading local feeds…</p>
+        </div>
+      </section>
+
+      <p id="notif-message" class="notif-message" role="status" aria-live="polite"></p>
+    </div>
+
+    <footer class="notification-dialog-footer">
+      <button id="notif-disable" class="notif-button notif-button-danger hidden" type="button">Turn off alerts</button>
+      <div class="notification-dialog-actions">
+        <button id="notif-cancel" class="notif-button notif-button-secondary" type="button">Done</button>
+        <button id="notif-primary" class="notif-button notif-button-primary" type="button" disabled>Turn on alerts</button>
+      </div>
+    </footer>
+  </section>
+</div>
 
 {% block body_after_main %}{% endblock %}
 </body>

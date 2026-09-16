@@ -1,4 +1,4 @@
-const CACHE_NAME = 'scanner-cache-v20260821-ui-r1';
+const CACHE_NAME = 'scanner-cache-v20260821-pwa-menu-r1';
 const OFFLINE_URL = 'offline.html';
 
 // Use relative paths so this worker works under /scanner/ when installed there.
@@ -135,8 +135,8 @@ self.addEventListener('message', (event) => {
 //
 
 
-// Handle push events (display notifications)
-self.addEventListener('push', function(event) {
+// Handle push events with one concise, deep-linked notification per feed.
+self.addEventListener('push', (event) => {
   let payload = {};
   try {
     if (event.data) payload = event.data.json();
@@ -144,12 +144,21 @@ self.addEventListener('push', function(event) {
     try { payload = { message: event.data.text() }; } catch (e2) { payload = { message: 'New notification' }; }
   }
 
-  const title = (payload && payload.title) || 'Scanner';
+  const feed = payload.feed || payload.data?.feed || '';
+  const targetUrl = payload.data?.url || (feed ? `/scanner/view?feed=${encodeURIComponent(feed)}` : '/scanner/');
+  const title = payload.title || 'Scanner activity';
   const options = {
-    body: (payload && payload.message) || '',
-    icon: 'static/icons/icon-192x192-v2.png',
-    badge: 'static/icons/icon-192x192-v2.png',
-    data: payload.data || {}
+    body: payload.message || 'A new scanner call is ready to listen.',
+    icon: '/scanner/static/icons/icon-192x192-v2.png',
+    badge: '/scanner/static/icons/icon-192x192-v2.png',
+    tag: payload.tag || (feed ? `scanner-call-${feed}` : 'scanner-activity'),
+    renotify: true,
+    timestamp: Date.now(),
+    data: { ...(payload.data || {}), url: targetUrl, feed },
+    actions: [
+      { action: 'listen', title: 'Listen now' },
+      { action: 'archive', title: 'Open archive' },
+    ],
   };
 
   event.waitUntil(self.registration.showNotification(title, options));
@@ -157,15 +166,22 @@ self.addEventListener('push', function(event) {
 
 
 // Handle notification click
-self.addEventListener('notificationclick', function(event) {
+self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const targetUrl = event.notification.data && event.notification.data.url ? event.notification.data.url : '/scanner/';
+  const feed = event.notification.data?.feed || '';
+  const targetUrl = event.action === 'archive'
+    ? `/scanner/archive${feed ? `?feed=${encodeURIComponent(feed)}` : ''}`
+    : (event.notification.data?.url || '/scanner/');
   const urlToOpen = new URL(targetUrl, self.location.origin).href;
   event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then( windowClients => {
-      for (let i = 0; i < windowClients.length; i++) {
-        const client = windowClients[i];
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
         if (client.url === urlToOpen && 'focus' in client) return client.focus();
+      }
+      for (const client of windowClients) {
+        if ('navigate' in client && 'focus' in client) {
+          return client.navigate(urlToOpen).then(() => client.focus());
+        }
       }
       if (clients.openWindow) return clients.openWindow(urlToOpen);
     })

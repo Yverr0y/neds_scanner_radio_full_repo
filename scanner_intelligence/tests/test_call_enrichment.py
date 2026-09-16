@@ -11,6 +11,7 @@ from scanner_intelligence import (
     get_pending_call_enrichments,
     process_call_enrichment_batch,
 )
+from shared.ai_availability import AIServiceUnavailable
 
 
 class CallEnrichmentTest(unittest.TestCase):
@@ -298,6 +299,32 @@ class CallEnrichmentTest(unittest.TestCase):
             now=datetime(2026, 7, 29, 10, 6),
         )
         self.assertEqual([item["call_id"] for item in pending], [11, 10])
+
+    def test_ai_outage_defers_batch_without_reporting_failed_calls(self) -> None:
+        def unavailable(_candidates):
+            raise AIServiceUnavailable("AI offline")
+
+        result = process_call_enrichment_batch(
+            generator=unavailable,
+            db_path=str(self.calls_db),
+            storage_db_path=str(self.intelligence_db),
+            day="2026-07-29",
+            now=datetime(2026, 7, 29, 10, 5),
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["degraded"])
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual(result["deferred"], 2)
+        with sqlite3.connect(self.intelligence_db) as conn:
+            rows = conn.execute(
+                """
+                SELECT status, attempts
+                FROM scanner_call_enrichments
+                ORDER BY call_id
+                """
+            ).fetchall()
+        self.assertEqual(rows, [("pending", 0), ("pending", 0)])
 
 
 if __name__ == "__main__":

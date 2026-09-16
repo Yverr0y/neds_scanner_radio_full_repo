@@ -2,13 +2,28 @@
   "name": "Ned's Scanner Network",
   "short_name": "Scanner",
   "id": "/scanner/",
-  "start_url": "/scanner/?pv=20260425-2",
+  "start_url": "/scanner/?pv=20260821-alerts-1",
   "scope": "/scanner/",
   "display": "standalone",
   "display_override": ["standalone", "browser"],
   "background_color": "#07101d",
   "theme_color": "#07101d",
   "description": "Live and archived scanner radio feeds, stats, archive tools, and training review in one installable app.",
+  "shortcuts": [
+    {
+      "name": "Scanner alert settings",
+      "short_name": "Alerts",
+      "description": "Choose local Police and Fire alerts for this device.",
+      "url": "/scanner/?notifications=1",
+      "icons": [
+        {
+          "src": "/scanner/static/icons/icon-192x192-v2.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ],
   "icons": [
     {
       "src": "/scanner/static/icons/icon-192x192-v2.png",

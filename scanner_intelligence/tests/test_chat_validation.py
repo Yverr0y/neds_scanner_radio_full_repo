@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
 from flask import Flask
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -11,9 +12,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "web"))
 
 from routes.routes_chat import _validated_messages, chat_bp
 import chatbot.app as chatbot_app
+from shared.ai_availability import AIServiceUnavailable
 
 
 class ChatValidationTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        chatbot_app._mark_vllm_available()
+
     def test_accepts_only_user_and_assistant_roles(self) -> None:
         messages = [
             {"role": "user", "content": "What happened today?"},
@@ -50,6 +55,60 @@ class ChatValidationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Cache-Control"], "no-store, max-age=0")
         self.assertEqual(response.headers["Pragma"], "no-cache")
+
+    def test_ai_connection_outage_opens_short_circuit(self) -> None:
+        chatbot_app._mark_vllm_available()
+        with patch(
+            "chatbot.app.requests.post",
+            side_effect=requests.ConnectionError("connection refused"),
+        ) as post:
+            with self.assertRaises(AIServiceUnavailable):
+                chatbot_app.call_vllm_chat([{"role": "user", "content": "hello"}])
+            with self.assertRaises(AIServiceUnavailable):
+                chatbot_app.call_vllm_chat([{"role": "user", "content": "again"}])
+
+        self.assertTrue(chatbot_app.vllm_in_backoff())
+        self.assertEqual(post.call_count, 1)
+
+    def test_chat_summary_uses_verified_fallback_during_ai_outage(self) -> None:
+        app = Flask(__name__)
+        app.register_blueprint(chat_bp)
+        fallback = {
+            "ok": True,
+            "day": "2026-08-21",
+            "take": {
+                "headline": "Ned’s Take for 2026-08-21",
+                "straight_summary": "Hopedale recorded 12 transmissions.",
+                "ned_take": "Verified radio activity is shown below.",
+                "highlights": [],
+                "towns": [],
+            },
+        }
+        with (
+            patch(
+                "routes.routes_chat.chatbot_app.run_tool_loop",
+                side_effect=AIServiceUnavailable("AI offline"),
+            ),
+            patch(
+                "routes.routes_chat.get_or_generate_daily_take",
+                return_value=fallback,
+            ),
+        ):
+            response = app.test_client().post(
+                "/scanner/api/chat/local",
+                json={
+                    "messages": [
+                        {"role": "user", "content": "Summarize Hopedale today"}
+                    ]
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["ok"])
+        self.assertTrue(response.json["degraded"])
+        self.assertFalse(response.json["ai_available"])
+        self.assertIn("verified scanner recap", response.json["answer"])
+        self.assertIn("Hopedale recorded 12 transmissions", response.json["answer"])
 
     def test_incident_take_returns_actual_calls_without_browser_caching(self) -> None:
         app = Flask(__name__)
